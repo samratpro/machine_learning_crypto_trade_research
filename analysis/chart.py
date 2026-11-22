@@ -16,12 +16,17 @@ def _ext(s):
     return pd.concat([s, s.iloc[-1:]], ignore_index=True)
 
 
-def _price_range(win, highlight):
+def _price_range(win, highlight, zoom=False):
+    """zoom=False: keep candles + all 3 EMAs + highlighted trade's stop / TP in view.
+       zoom=True : fit the candles + fast EMA only, so small EMA moves are visible (other lines may be cut off)."""
     levels = [win.w['low_5m'].min(), win.w['high_5m'].max()]
-    for p in map(int, win.ema_set.split('_')):          # keep all 3 EMAs of the pair (incl. EMA200) in view
+    emas = list(map(int, win.ema_set.split('_')))
+    for p in (emas[:1] if zoom else emas):              # zoom: fast EMA only | else all 3 (incl. EMA200)
         s = win.w[f'ema{p}_15m']
         levels += [s.min(), s.max()]
-    if highlight and 1 <= highlight <= len(win.trades):
+    if len(win.trades):                                 # every exit price stays in view
+        levels += [win.trades['exit'].min(), win.trades['exit'].max()]
+    if not zoom and highlight and 1 <= highlight <= len(win.trades):
         t = win.trades.iloc[highlight - 1]
         levels += [t.stop_init, t.take_profit]
     lo, hi = min(levels), max(levels)
@@ -104,8 +109,10 @@ def _trade_detail(fig, win, t, n, margin_usdt):
 
 
 def _trades(fig, win, margin_usdt, highlight):
-    """Every trade: thin path entry -> exit (green win / red loss) + entry/exit markers. Returns table rows."""
-    rows = []
+    """Every trade: path entry -> exit (green win / red loss) + entry/exit markers. Returns table rows.
+    Trades that exit after the window: gray dotted path to the window end, and the real exit drawn
+    in the right margin (one marker per exit time/price, label = time + trade numbers)."""
+    rows, later = [], {}
     end_time = win.w['open_time'].iloc[-1] + FIVE_MIN
     last_close = win.w['close_5m'].iloc[-1]
     for n, (_, t) in enumerate(win.trades.iterrows(), 1):
@@ -114,22 +121,43 @@ def _trades(fig, win, margin_usdt, highlight):
         win_col = T.GREEN if t.roe > 0 else T.RED
         x1, y1 = (t.exit_time, t.exit) if inside else (end_time, last_close)
         fig.add_trace(go.Scatter(x=[t.entry_time, x1], y=[t.entry, y1], mode='lines', hoverinfo='skip',
-                                 name='trade path (green win / red loss)', legendgroup='path', opacity=0.55,
-                                 line=dict(color=win_col, width=1, dash='solid' if inside else 'dot')), 1, 1)
+                                 name='trade path (green win / red loss)' if inside else 'still open at window end',
+                                 legendgroup='path' if inside else 'open', opacity=0.55,
+                                 line=dict(color=win_col if inside else T.MUTED, width=1,
+                                           dash='solid' if inside else 'dot')), 1, 1)
         fig.add_trace(go.Scatter(x=[t.entry_time], y=[t.entry], mode='markers',
                                  name='long entry' if sgn == 1 else 'short entry',
                                  marker=dict(symbol='triangle-up' if sgn == 1 else 'triangle-down', size=8,
                                              color=T.GREEN if sgn == 1 else T.RED, line=dict(width=0.5, color='black')),
-                                 hovertemplate=f'#{n} {t.side.upper()} {t.entry:,.2f} → {t.exit_reason} {t.roe:+.1%}<extra></extra>'), 1, 1)
+                                 hovertemplate=f'#{n} {t.side.upper()} {t.entry:,.2f} -> {t.exit_reason} '
+                                               f'{pd.Timestamp(t.exit_time):%m-%d %H:%M} {t.exit:,.2f} {t.roe:+.1%}<extra></extra>'), 1, 1)
         if inside:
-            fig.add_trace(go.Scatter(x=[t.exit_time], y=[t.exit], mode='markers', name='exit', hoverinfo='skip',
-                                     marker=dict(symbol='x', size=7, color=T.YELLOW)), 1, 1)
+            fig.add_trace(go.Scatter(x=[t.exit_time], y=[t.exit], mode='markers', name='exit',
+                                     marker=dict(symbol='x', size=9, color=win_col, line=dict(width=1, color='black')),
+                                     hovertemplate=f'#{n} exit {t.exit_reason} {t.exit:,.2f} {t.roe:+.1%}<extra></extra>'), 1, 1)
+        else:
+            key = (pd.Timestamp(t.exit_time), round(float(t.exit), 2), t.exit_reason)
+            later.setdefault(key, []).append((n, t.roe))
         if n == highlight:
             _trade_detail(fig, win, t, n, margin_usdt)
         rows.append([n, t.side.upper(), pd.Timestamp(t.entry_time).strftime('%m-%d %H:%M'), f'{t.entry:,.2f}',
                      f'{t.stop_init:,.2f}', f'{t.take_profit:,.2f}', int(t.trail_steps),
                      pd.Timestamp(t.exit_time).strftime('%m-%d %H:%M'), f'{t.exit:,.2f}', t.exit_reason,
                      int(t.bars_held), f'{t.roe:+.1%}', f'{t.roe * margin_usdt:+,.2f}'])
+    x_out = end_time + FIVE_MIN                   # right margin = "after the window"
+    for (et, px, reason), tl in later.items():
+        nums = ','.join(f'#{n}' for n, _ in tl)
+        avg = sum(r for _, r in tl) / len(tl)
+        col = T.GREEN if avg > 0 else T.RED
+        fig.add_trace(go.Scatter(x=[x_out], y=[px], mode='markers', name='exit after window',
+                                 marker=dict(symbol='x', size=10, color=col, line=dict(width=1, color='black')),
+                                 hovertemplate=f'{nums} {reason} {et:%m-%d %H:%M} @ {px:,.2f} · avg {avg:+.1%}<extra></extra>'), 1, 1)
+        fig.add_annotation(x=x_out, y=px, xanchor='left', showarrow=False, row=1, col=1, xshift=8,
+                           text=f'<b>OUT {et:%H:%M}</b> {reason} {px:,.0f} ({nums})', font=dict(size=9, color=col))
+    if later:
+        fig.add_vline(x=end_time, line=dict(color=T.MUTED, width=1, dash='dash'), row=1, col=1)
+        fig.add_annotation(x=end_time, y=1, yref='y domain', xanchor='left', showarrow=False, row=1, col=1,
+                           text='after window ->', font=dict(size=9, color=T.MUTED))
     return rows
 
 
@@ -152,14 +180,17 @@ def _volume(fig, win, x):
 def _plan_strip(fig, win, x):
     t, c = win.table, win.cols
     tick = lambda v: '✔' if v else '✘'
-    hover = [f"<b>{st}</b> · momentum {m}<br>{c['bull']} {tick(bu)} · {c['bear']} {tick(be)}<br>"
-             f"{c['slope']} {sl:+.2f} ATR · flat {tick(fl)}<br>{c['fslope']} {fs:+.2f} ATR · ok {tick(fo)}<br>"
+    hover = [f"<b>#{i} {st}</b> · momentum {m}<br>{c['bull']} {tick(bu)} · {c['bear']} {tick(be)}<br>"
+             f"{c['slope']} {sl:+.2f} ATR · not flat {tick(fl)}<br>{c['fslope']} {fs:+.2f} ATR · ok {tick(fo)}<br>"
              f"{c['dist']} {d:+.2f} · ok {tick(ok)}<br>{c['touch']} {tick(tc)}"
-             for st, m, bu, be, sl, fl, fs, fo, d, ok, tc in zip(
-                 t['STATE'], t['MOMENTUM'], t[c['bull']], t[c['bear']], t[c['slope']], t[c['flat']],
+             for i, st, m, bu, be, sl, fl, fs, fo, d, ok, tc in zip(
+                 t.index, t['STATE'], t['MOMENTUM'], t[c['bull']], t[c['bear']], t[c['slope']], t[c['flat']],
                  t[c['fslope']], t[c['fslope_ok']], t[c['dist']], t[c['dist_ok']], t[c['touch']])]
     fig.add_trace(go.Bar(x=x, y=[1] * len(t), marker_color=t['STATE'].map(T.STATE_COLORS), showlegend=False,
-                         name='plan', hovertext=hover, hoverinfo='text'), 3, 1)
+                         name='plan', hovertext=hover, hoverinfo='text',
+                         text=t.index.astype(str), textposition='inside', insidetextanchor='middle',
+                         textfont=dict(color='#0b0f17', size=10), textangle=0,
+                         cliponaxis=False), 3, 1)     # candle # = row in tables.rules(win)
     legend = '  '.join(f'<span style="color:{col}">■ {k.lower()}</span>' for k, col in T.STATE_COLORS.items())
     label = win.ema_set.replace('_', '/')
     fig.add_annotation(text=f'ENTRY PLAN PER CANDLE (EMA {label})   {legend}', x=0,
@@ -183,11 +214,12 @@ def _trade_table(fig, rows):
                    font=dict(color=[T.TXT] * 11 + [pnl_col, pnl_col], size=11))), 4, 1)
 
 
-def plot_window(win, margin_usdt=100, show_zones=('15m', '1h'), highlight=1, height=1150):
-    """highlight: trade number (1 = first) drawn with full stop/TP detail; None for none."""
+def plot_window(win, margin_usdt=100, show_zones=('15m', '1h'), highlight=1, height=1150, zoom=False):
+    """highlight: trade number (1 = first) drawn with full stop/TP detail; None for none.
+       zoom: True -> y-axis fits the candles + fast EMA (EMA slope easy to see), False -> everything in view."""
     x = win.w['open_time'].reset_index(drop=True)
     x_ext = pd.concat([x, pd.Series([x.iloc[-1] + FIVE_MIN])], ignore_index=True)
-    y0, y1 = _price_range(win, highlight)
+    y0, y1 = _price_range(win, highlight, zoom)
 
     fig = make_subplots(rows=4, cols=1, row_heights=[0.52, 0.09, 0.05, 0.34], vertical_spacing=0.03,
                         specs=[[{}], [{}], [{}], [{'type': 'table'}]])
@@ -210,7 +242,8 @@ def plot_window(win, margin_usdt=100, show_zones=('15m', '1h'), highlight=1, hei
              f"{'' if win.overlap else f' (skipped {len(win.skipped)})'}   ·   "
              f"{win.leverage:g}x · ${margin_usdt}/trade   ·   momentum now: {win.table['MOMENTUM'].iloc[-1]}")
 
-    xr = [x.iloc[0] - FIVE_MIN, x.iloc[-1] + 6 * FIVE_MIN]
+    later = len(win.trades) and (win.trades['exit_idx'] >= win.candles).any()
+    xr = [x.iloc[0] - FIVE_MIN, x.iloc[-1] + (16 if later else 6) * FIVE_MIN]   # room for exit-after-window labels
     for r in (1, 2, 3):
         fig.update_xaxes(range=xr, row=r, col=1, showgrid=r == 1, gridcolor=T.GRID, rangeslider_visible=False,
                          showticklabels=r == 3, matches='x', tickformat='%H:%M', color=T.MUTED)
@@ -218,7 +251,7 @@ def plot_window(win, margin_usdt=100, show_zones=('15m', '1h'), highlight=1, hei
     fig.update_yaxes(showticklabels=False, showgrid=False, row=2, col=1)
     fig.update_yaxes(visible=False, range=[0, 1], row=3, col=1)
     fig.update_layout(**T.base_layout(title, height))
-    fig.update_layout(hovermode='closest')     # many trades: hover one item at a time
+    fig.update_layout(hovermode='closest', uniformtext=dict(minsize=7, mode='show'))     # many trades: hover one item at a time
 
     seen = set()                                 # one legend entry per name
     for trace in fig.data:

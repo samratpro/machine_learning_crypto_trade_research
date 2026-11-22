@@ -19,8 +19,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from stop_loss import simulate_trades
-from zone_create import VOL_AVG_BARS
+from stop_loss import simulate_trades, STOP_LOSS, TRAIL_STEP, TAKE_PROFIT, TRAIL_GAP
+from zone_create import VOL_AVG_BARS, FAST_SLOPE_MIN, entry_signal
 
 ROOT = Path(__file__).resolve().parent.parent
 _cache: dict[str, tuple[float, pd.DataFrame]] = {}
@@ -62,11 +62,11 @@ EMA_SETS = {'9_21_200': (9, 21, 200), '13_48_200': (13, 48, 200)}
 def rule_columns(ema_set: str) -> dict:
     f, m, sl = EMA_SETS[ema_set]
     return {'bull': f'EMA {f}>{m}>{sl}', 'bear': f'EMA {sl}>{m}>{f}', 'slope': f'EMA{m} slope',
-            'flat': f'EMA{m} flat', 'fslope': f'EMA{f} slope', 'fslope_ok': f'EMA{f} slope ok',
-            'dist': f'close-EMA{f} (ATR)', 'dist_ok': 'distance ok', 'touch': f'touch EMA{m}'}
+            'flat': f'EMA{m} not flat', 'fslope': f'EMA{f} slope', 'fslope_ok': f'EMA{f} slope ok',
+            'dist': f'close-EMA{f} (ATR)', 'dist_ok': 'distance ok', 'touch': f'Not touch EMA{m}'}
 
 
-def rule_table(w: pd.DataFrame, ema_set: str) -> pd.DataFrame:
+def rule_table(w: pd.DataFrame, ema_set: str, slope_min: float = FAST_SLOPE_MIN) -> pd.DataFrame:
     f, m, _ = EMA_SETS[ema_set]
     c = rule_columns(ema_set)
     mom = w['momentum']
@@ -78,21 +78,25 @@ def rule_table(w: pd.DataFrame, ema_set: str) -> pd.DataFrame:
         c['bull']:    w[f'bull_{ema_set}_15m'] == 1,
         c['bear']:    w[f'bear_{ema_set}_15m'] == 1,
         c['slope']:   w[f'ema{m}_slope_15m'].round(2),
-        c['flat']:    w[f'ema{m}_flat_15m'] == 1,
+        c['flat']:    w[f'ema{m}_flat_15m'] == 0,
         'MOMENTUM':   mom.map({1: 'BULL', -1: 'BEAR', 0: 'NONE'}),
         c['fslope']:  fslope.round(2),
-        c['fslope_ok']: (mom != 0) & (mom * fslope > 0),
+        c['fslope_ok']: (mom != 0) & (mom * fslope > slope_min),
         c['dist']:    dist.round(2),
         c['dist_ok']: (mom != 0) & (mom * dist >= 0),
-        c['touch']:   w[f'touch_ema{m}_5m'] == 1,
+        c['touch']:   w[f'touch_ema{m}_5m'] == 0,
         'ENTRY':      w['entry'].map({1: 'BUY', -1: 'SELL', 0: '-'}),
     }).reset_index(drop=True)
 
 
 def build_window(symbol: str, start_time, candles: int = 30, leverage: float = 10,
-                 overlap: bool = True, ema_set: str = '9_21_200') -> Window:
+                 overlap: bool = True, ema_set: str = '9_21_200', stop_loss: float = STOP_LOSS,
+                 trail_step: float = TRAIL_STEP, take_profit: float = TAKE_PROFIT,
+                 trail_gap=TRAIL_GAP, slope_min: float = FAST_SLOPE_MIN) -> Window:
     """candles = 30        -> the 30 candles starting at start_time
-       candles = (30, 60)  -> candle 30 up to (not incl.) candle 60, counted from start_time (candle 0)"""
+       candles = (30, 60)  -> candle 30 up to (not incl.) candle 60, counted from start_time (candle 0)
+       slope_min: fast EMA slope (ATR units) must be > this in the trade direction (0 = any rise / fall)
+       stop_loss / trail_step / take_profit: position % (ROE), e.g. 0.20 = -20% -> price % = value / leverage"""
     df = load(symbol)
     start = int(df['open_time'].searchsorted(pd.Timestamp(start_time, tz='UTC')))
     if isinstance(candles, (tuple, list)):
@@ -101,15 +105,19 @@ def build_window(symbol: str, start_time, candles: int = 30, leverage: float = 1
             raise ValueError(f'CANDLES range {candles}: need 0 <= start < end')
         start, candles = start + a, b - a
     signal_col = f'entry_{ema_set}'
+    if slope_min != FAST_SLOPE_MIN:              # re-run the entry rule with this slope minimum
+        df = df.copy()
+        df[signal_col] = entry_signal(df, ema_set, slope_min)
     w = df.iloc[start:start + candles].copy()
     w['entry'] = w[signal_col]
     w['momentum'] = w[f'momentum_{ema_set}_15m']
     candles = len(w)
     vol_avg = df['volume_5m'].rolling(VOL_AVG_BARS).mean().shift(1).iloc[start:start + candles]
-    table = rule_table(w, ema_set)
+    table = rule_table(w, ema_set, slope_min)
 
     # simulate from the window start; a trade may run past the window
     trades = simulate_trades(df.iloc[start:].reset_index(drop=True), leverage=leverage, keep_path=True,
+                             stop_loss=stop_loss, trail_step=trail_step, take_profit=take_profit, trail_gap=trail_gap,
                              last_signal=candles - 1, overlap=overlap,
                              signal_col=signal_col)
     if not trades.empty:

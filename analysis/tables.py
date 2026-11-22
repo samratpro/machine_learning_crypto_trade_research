@@ -13,9 +13,8 @@ def rules(win):
     return (t.style
             .format({k: tick for k in (c['bull'], c['bear'], c['flat'], c['fslope_ok'], c['dist_ok'], c['touch'])},
                     precision=2)
-            .map(on(theme.GREEN), subset=[c['bull'], c['fslope_ok'], c['dist_ok']])
-            .map(on(theme.RED), subset=[c['bear'], c['touch']])
-            .map(on(theme.YELLOW), subset=[c['flat']])
+            .map(on(theme.GREEN), subset=[c['bull'], c['flat'], c['fslope_ok'], c['dist_ok'], c['touch']])
+            .map(on(theme.RED), subset=[c['bear']])
             .map(lambda v: theme.CELL_COLORS.get(v, ''), subset=['MOMENTUM', 'ENTRY', 'STATE']))
 
 

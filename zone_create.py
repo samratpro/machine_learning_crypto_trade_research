@@ -20,6 +20,7 @@ NEAR_ATR_5M = 0.5        # "near" tolerance, in 5m ATR
 TOP_CLOSE_PCT = 0.35     # close in top 35% of the bar
 TAKER_BUY_RATIO = 0.52
 VOL_AVG_BARS = 20
+FAST_SLOPE_MIN = 0.0     # fast EMA (EMA9/13) slope must be > this (ATR units) in the trade direction
 
 
 def atr(df: pd.DataFrame, period: int = ATR_PERIOD,
@@ -72,6 +73,17 @@ def add_zone_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- step 3
+def entry_signal(df: pd.DataFrame, name: str, slope_min: float = FAST_SLOPE_MIN) -> np.ndarray:
+    """1 = buy, -1 = sell, 0 = nothing for one EMA test ('9_21_200' / '13_48_200'). Needs dist/touch columns.
+    slope_min: fast EMA slope must be > slope_min in the momentum direction (buy: > +min, sell: < -min)."""
+    fast, mid = {"9_21_200": (9, 21), "13_48_200": (13, 48)}[name]
+    m = df[f"momentum_{name}_15m"]
+    dist = df[f"dist_ema{fast}_5m"]
+    slope = df[f"ema{fast}_slope_15m"]
+    touch = df[f"touch_ema{mid}_5m"] == 1
+    return np.where((m * dist >= 0) & (m * slope > slope_min) & ~touch, m, 0).astype("int8")
+
+
 def add_entry_signal(df: pd.DataFrame) -> pd.DataFrame:
     """ENTRY (docs/entry.md) - the only entry rule, one column per EMA test (never both at once):
       entry_9_21_200   uses momentum_9_21_200  + distance to EMA9
@@ -134,11 +146,7 @@ def add_entry_signal(df: pd.DataFrame) -> pd.DataFrame:
     for p in (21, 48):
         ema = df[f"ema{p}_15m"]
         df[f"touch_ema{p}_5m"] = ((l <= ema) & (h >= ema)).astype("int8")
-    for name, fast, mid in (("9_21_200", 9, 21), ("13_48_200", 13, 48)):
-        touch = df[f"touch_ema{mid}_5m"] == 1
-        m = df[f"momentum_{name}_15m"]
-        dist = (c - df[f"ema{fast}_15m"]) / df["atr_5m"]
-        df[f"dist_ema{fast}_5m"] = dist
-        slope = df[f"ema{fast}_slope_15m"]          # fast EMA must point in the momentum direction
-        df[f"entry_{name}"] = np.where((m * dist >= 0) & (m * slope > 0) & ~touch, m, 0).astype("int8")
+    for name, fast in (("9_21_200", 9), ("13_48_200", 13)):
+        df[f"dist_ema{fast}_5m"] = (c - df[f"ema{fast}_15m"]) / df["atr_5m"]
+        df[f"entry_{name}"] = entry_signal(df, name)    # fast EMA slope must point in the momentum direction
     return df

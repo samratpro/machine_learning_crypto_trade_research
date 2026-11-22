@@ -2,8 +2,10 @@
 Stop-loss / trailing / take-profit simulation (docs/stop_loss.md).
 
   - Keep 20% loss position  -> initial stop at -20% position PnL
-  - Trail each 10% move     -> each +10% reached moves the stop up 10%
-                               (+10% -> stop -10%, +20% -> 0%, +30% -> +10%, ...)
+  - Trail each 10% move     -> once the trade reaches +10%, the stop follows the best price
+                               10% behind it and never moves down
+                               (+10% -> stop 0% break-even, +15% -> +5%, +30% -> +20%, ...)
+                               TRAIL_GAP sets that distance (default = TRAIL_STEP); e.g. 0.05 -> +10% -> stop +5%
   - Take profit reach 50%   -> exit at +50% position PnL
 
 Percentages are position PnL (ROE), i.e. price move x LEVERAGE.
@@ -24,14 +26,16 @@ import pandas as pd
 STOP_LOSS = 0.20
 TRAIL_STEP = 0.10
 TAKE_PROFIT = 0.50
+TRAIL_GAP = None          # how far the stop follows behind the best price (position %); None = TRAIL_STEP
 LEVERAGE = 10
 FEE_RATE = 0.00055        # per side, on notional (Bybit taker)
 
 
-def _run_trade(o, h, l, e, side, sl_px, step_px, tp_px):
+def _run_trade(o, h, l, e, side, sl_px, step_px, tp_px, gap_px=None):
     """Walk one trade from bar e. side = 1 long, -1 short.
     Returns (exit_idx, exit_px, reason, steps, stops); stops[k] = stop active during bar e+k."""
     n = len(o)
+    gap_px = step_px if gap_px is None else gap_px
     entry = o[e]
     stop = entry * (1 - side * sl_px)
     tp = entry * (1 + side * tp_px)
@@ -48,17 +52,18 @@ def _run_trade(o, h, l, e, side, sl_px, step_px, tp_px):
             gap = (max if side == 1 else min)(o[j], tp) if j > e else tp
             return j, gap, "take_profit", steps, stops
         best = h[j] if side == 1 else l[j]
-        new_steps = int(np.floor(side * (best / entry - 1) / step_px + 1e-9))
-        if new_steps > steps:
-            steps = new_steps
-            stop = entry * (1 - side * (sl_px - steps * step_px))
+        gain = side * (best / entry - 1)                 # best price move this bar (price %)
+        steps = max(steps, int(np.floor(gain / step_px + 1e-9)))
+        if gain >= step_px - 1e-12:                      # in profit by one step -> follow the price
+            trail = best * (1 - side * gap_px)           # gap_px behind the best price
+            stop = max(stop, trail) if side == 1 else min(stop, trail)
         j += 1
     return None, None, "open_eod", steps, stops
 
 
 def simulate_trades(df: pd.DataFrame, signal_col: str = "entry_9_21_200",
                     stop_loss=STOP_LOSS, trail_step=TRAIL_STEP,
-                    take_profit=TAKE_PROFIT, leverage=LEVERAGE,
+                    take_profit=TAKE_PROFIT, leverage=LEVERAGE, trail_gap=TRAIL_GAP,
                     fee_rate=FEE_RATE, keep_path=False, last_signal=None,
                     overlap=False) -> pd.DataFrame:
     """signal_col: 1 = buy (long), -1 = sell (short), 0 = nothing.
@@ -75,6 +80,7 @@ def simulate_trades(df: pd.DataFrame, signal_col: str = "entry_9_21_200",
     sig = df[signal_col].to_numpy()
 
     sl_px, step_px, tp_px = stop_loss / leverage, trail_step / leverage, take_profit / leverage
+    gap_px = None if trail_gap is None else trail_gap / leverage
     trades = []
     i, n = 0, len(df)
     stop_at = n - 1 if last_signal is None else min(n - 1, last_signal + 1)
@@ -84,7 +90,7 @@ def simulate_trades(df: pd.DataFrame, signal_col: str = "entry_9_21_200",
             continue
         side = 1 if sig[i] > 0 else -1
         e = i + 1
-        j, exit_px, reason, steps, stops = _run_trade(o, h, l, e, side, sl_px, step_px, tp_px)
+        j, exit_px, reason, steps, stops = _run_trade(o, h, l, e, side, sl_px, step_px, tp_px, gap_px)
         if j is None:                            # still open at end of data
             j, exit_px = n - 1, c[-1]
         entry = o[e]
