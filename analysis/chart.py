@@ -261,3 +261,50 @@ def plot_window(win, margin_usdt=100, show_zones=('15m', '1h'), highlight=1, hei
             trace.showlegend = False
         seen.add(trace.name)
     return fig
+
+
+# ---------------- sliding-window backtest (backtest_by_feature.ipynb) ----------------
+_SYM_COLORS = [T.CYAN, T.YELLOW, '#a855f7', T.BLUE, '#f97316', T.GREEN, '#ec4899']
+
+
+def plot_sliding(res, bins=80):
+    """1: cumulative P&L of the period trades (each once, by exit time)
+       2: average window net $ per day
+       3: distribution of window net $ (pre-binned, so millions of windows stay light)"""
+    fig = make_subplots(rows=3, cols=1, row_heights=[0.4, 0.3, 0.3], vertical_spacing=0.08,
+                        subplot_titles=('cumulative P&L $ (each trade once)', 'avg window net $ per day',
+                                        'distribution of window net $'))
+    lo, hi = res.windows['net_$'].min(), res.windows['net_$'].max()
+    edges = np.linspace(lo, hi if hi > lo else lo + 1, bins + 1)
+    mid = (edges[:-1] + edges[1:]) / 2
+    for k, (sym, run) in enumerate(res.runs.items()):
+        color = _SYM_COLORS[k % len(_SYM_COLORS)]
+        tr = run.trades.sort_values('exit_time')
+        if len(tr):
+            eq = (tr['roe'] * res.margin_usdt).cumsum()
+            daily = eq.groupby(tr['exit_time'].dt.floor('D').to_numpy()).last()
+            fig.add_trace(go.Scatter(x=daily.index, y=daily.to_numpy(), mode='lines', name=sym, legendgroup=sym,
+                                     line=dict(color=color, width=1.4),
+                                     hovertemplate='%{y:+,.2f}$<extra>' + sym + '</extra>'), 1, 1)
+        w = run.windows
+        day = w.groupby(w['start_time'].dt.floor('D'))['net_$'].mean()
+        fig.add_trace(go.Scatter(x=day.index, y=day.to_numpy(), mode='lines', name=sym, legendgroup=sym,
+                                 showlegend=False, line=dict(color=color, width=1),
+                                 hovertemplate='%{y:+,.2f}$ avg<extra>' + sym + '</extra>'), 2, 1)
+        counts, _ = np.histogram(w['net_$'], edges)
+        fig.add_trace(go.Bar(x=mid, y=counts, name=sym, legendgroup=sym, showlegend=False, marker_color=color,
+                             opacity=0.55, width=edges[1] - edges[0],
+                             hovertemplate='%{x:+,.0f}$: %{y:,} windows<extra>' + sym + '</extra>'), 3, 1)
+    for row in (1, 2):
+        fig.add_hline(y=0, line=dict(color=T.MUTED, width=1, dash='dot'), row=row, col=1)
+    fig.add_vline(x=0, line=dict(color=T.MUTED, width=1, dash='dot'), row=3, col=1)
+    layout = T.base_layout(f'{", ".join(res.runs)} | window {res.size} | step {res.step} | '
+                           f'{"overlap" if res.overlap else "one trade at a time"}', 900)
+    layout.update(barmode='overlay', hovermode='x unified')
+    fig.update_layout(**layout)
+    fig.update_xaxes(gridcolor=T.GRID, zeroline=False)
+    fig.update_yaxes(gridcolor=T.GRID, zeroline=False)
+    fig.update_xaxes(title_text='window net $', row=3, col=1)
+    for a in fig.layout.annotations:
+        a.font = dict(size=11, color=T.MUTED)
+    return fig
