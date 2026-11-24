@@ -55,6 +55,23 @@ Companion to [paper_analysis.md](paper_analysis.md). Part A lists gaps in the **
 | B11 | **Look-ahead risk in HTF merge** (the bug that cost the 2602.10785 authors 0.20 AUC) | Silent inflation of results | Add a test that the 5m row never sees an unfinished 15m/1h/4h/1d bar. The same applies to the 1d zone (`shift(1)` on daily). |
 | B12 | **Fixed leverage, no sizing** | Discards model confidence | Calibrated probability → fractional sizing (Meyer et al. 2023). Compare with fixed size. |
 
+### Status of Part B (2026-11-24)
+
+| # | Status | Where |
+|---|---|---|
+| B1 | Reset: old figures invalid. Dev win rate 46.6% vs break-even 49.5% under the ATR exits; every run is now logged | `results/trials.csv`, `trial_log.py` |
+| B2 | Done: uniqueness weights (≈ 440k rows ≈ 15k effective trades), purged + embargoed walk-forward folds | `features.walk_forward`, `weight` column |
+| B3 | Done: 24 h time barrier (`MAX_BARS = 288`) | `stop_loss.py` |
+| B4 | Done: stop / trail / TP in ATR | `stop_loss.py` |
+| B5 | Open: data is Binance spot; Bybit only for paper trading later. State it as a limitation; funding not modelled | paper text |
+| B6 | Done: model gets continuous values; 0/1 flags excluded | `features.py` |
+| B7 | Done: time of day, volatility regime, volume z-score, round numbers, zone touches / age, BTC lead, momentum age | `features.py` |
+| B8 | Done from now on: every backtest / momentum test appends to the trial log | `trial_log.py` |
+| B9 | Ready: folds and holdout are time-ordered; report per year × coin in the training step | `features.py` |
+| B10 | Open: block / timestamp bootstrap for confidence intervals, BTC-only result | training step |
+| B11 | Done: merge by close time + test against raw candles; feature look-ahead test | `check_merge.py`, `features.check_no_lookahead` |
+| B12 | Open: calibrated probability → position size | training step |
+
 ---
 
 ## Part C — Proposed research questions and framing

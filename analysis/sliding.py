@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
-from stop_loss import simulate_trades, STOP_LOSS, TRAIL_STEP, TAKE_PROFIT, TRAIL_GAP, FEE_RATE
+from stop_loss import simulate_trades, STOP_LOSS, TRAIL_STEP, TAKE_PROFIT, TRAIL_GAP, FEE_RATE, ATR_COL, MAX_BARS
 from zone_create import FAST_SLOPE_MIN, entry_signal
 from .window import ROOT, EMA_SETS
 
@@ -35,9 +35,9 @@ def all_symbols() -> list[str]:
 
 def _load(symbol: str, ema_set: str) -> pd.DataFrame:
     """Only the columns the backtest needs (keeps memory low for ALL symbols)."""
-    f, m, _ = EMA_SETS[ema_set]
-    cols = ['open_time', 'open_5m', 'high_5m', 'low_5m', 'close_5m', f'entry_{ema_set}',
-            f'momentum_{ema_set}_15m', f'dist_ema{f}_5m', f'ema{f}_slope_15m', f'touch_ema{m}_5m']
+    f = EMA_SETS[ema_set][0]
+    cols = ['open_time', 'open_5m', 'high_5m', 'low_5m', 'close_5m', f'momentum_{ema_set}_15m',
+            f'ema{f}_slope_15m', ATR_COL]
     return pd.read_parquet(ROOT / 'data' / f'{symbol}_master.parquet', columns=cols)
 
 
@@ -49,53 +49,63 @@ class Run:                       # one symbol
     candles: int
     trades: pd.DataFrame         # period trades, each counted once
     windows: pd.DataFrame        # one row per window
-    signal: np.ndarray = None    # entry signal per period candle (1 buy, -1 sell, 0 none)
+    signal: np.ndarray = None    # entry signal per period candle (1 long, -1 short, 0 none)
     long_roe: np.ndarray = None  # ROE a long opened after this candle would make (same stop / trail / TP rules)
     short_roe: np.ndarray = None # ROE a short would make
 
 
-def _outcomes(o, h, l, c, count, side, sl, step, tp, gap, lev, fee):
+def _outcomes(o, h, l, c, atr, count, side, sl, step, tp, gap, lev, fee, max_bars=MAX_BARS):
     """ROE of a trade (side 1 long / -1 short) opened at the next open after every candle 0..count-1.
+    sl / step / tp / gap are ATR multiples (atr of the signal candle).
     Same bar logic as stop_loss._run_trade (stop first, then TP, then trail), written lean for speed."""
     n = len(o)
     gap = step if gap is None else gap
-    o, h, l = o.tolist(), h.tolist(), l.tolist()
+    o, h, l, atr, cl = o.tolist(), h.tolist(), l.tolist(), atr.tolist(), c.tolist()
     last = c[-1]
     out = np.full(count, np.nan)
     cost = 2 * fee * lev
     for i in range(min(count, n - 1)):
+        a = atr[i]
+        if not a > 0:
+            continue
         e = i + 1
         entry = o[e]
+        sl_d, step_d, tp_d, gap_d = sl * a, step * a * (1 - 1e-9), tp * a, gap * a
         j, px = e, None
+        end = n if max_bars is None else min(n, e + max_bars)
         if side == 1:
-            stop, target = entry * (1 - sl), entry * (1 + tp)
-            while j < n:
+            stop, target = entry - sl_d, entry + tp_d
+            while j < end:
                 if l[j] <= stop:
                     px = min(o[j], stop) if j > e else stop
                     break
                 if h[j] >= target:
                     px = max(o[j], target) if j > e else target
                     break
-                if h[j] / entry - 1 >= step - 1e-12:
-                    t = h[j] * (1 - gap)
+                if h[j] - entry >= step_d:
+                    t = h[j] - gap_d
                     if t > stop:
                         stop = t
                 j += 1
+            if px is None and end < n:
+                px = cl[end - 1]                     # time limit
             out[i] = ((last if px is None else px) / entry - 1) * lev - cost
         else:
-            stop, target = entry * (1 + sl), entry * (1 - tp)
-            while j < n:
+            stop, target = entry + sl_d, entry - tp_d
+            while j < end:
                 if h[j] >= stop:
                     px = max(o[j], stop) if j > e else stop
                     break
                 if l[j] <= target:
                     px = min(o[j], target) if j > e else target
                     break
-                if 1 - l[j] / entry >= step - 1e-12:
-                    t = l[j] * (1 + gap)
+                if entry - l[j] >= step_d:
+                    t = l[j] + gap_d
                     if t < stop:
                         stop = t
                 j += 1
+            if px is None and end < n:
+                px = cl[end - 1]                     # time limit
             out[i] = (1 - (last if px is None else px) / entry) * lev - cost
     return out
 
@@ -127,20 +137,20 @@ def _scores(cm: dict, roe_pred=None, roe_all=None, margin=100) -> dict:
 
 def classification(runs, margin: float = 100) -> pd.DataFrame:
     """Entry signal as a classifier, on every candle of the period (all signals, whatever OVERLAP is):
-    BUY : predicted = buy signal,  actual = a long from this candle ends with ROE > 0
-    SELL: predicted = sell signal, actual = a short from this candle ends with ROE > 0
-    BOTH: BUY + SELL counts added (micro average)."""
+    LONG : predicted = long signal,  actual = a long from this candle ends with ROE > 0
+    SHORT: predicted = short signal, actual = a short from this candle ends with ROE > 0
+    BOTH : LONG + SHORT counts added (micro average)."""
     runs = [r for r in runs if r.long_roe is not None]
     if not runs:
         return None
     sig = np.concatenate([r.signal for r in runs])
     lr = np.concatenate([r.long_roe for r in runs])
     sr = np.concatenate([r.short_roe for r in runs])
-    buy, sell = _confusion(sig == 1, lr), _confusion(sig == -1, sr)
-    both = {k: buy[k] + sell[k] for k in buy}
+    lng, sht = _confusion(sig == 1, lr), _confusion(sig == -1, sr)
+    both = {k: lng[k] + sht[k] for k in lng}
     out = pd.DataFrame({
-        'BUY': _scores(buy, lr[sig == 1], lr, margin),
-        'SELL': _scores(sell, sr[sig == -1], sr, margin),
+        'LONG': _scores(lng, lr[sig == 1], lr, margin),
+        'SHORT': _scores(sht, sr[sig == -1], sr, margin),
         'BOTH': _scores(both, np.concatenate([lr[sig == 1], sr[sig == -1]]), np.concatenate([lr, sr]), margin),
     })
     out.index.name = 'metric'
@@ -170,7 +180,8 @@ def breakdown(trades: pd.DataFrame, margin: float = 100) -> dict:
     side = by('side').reindex(['long', 'short']).dropna(how='all')
     side.loc['all'] = agg(tr)
     tr['exit'] = tr['exit_reason'] + np.where(tr['win'], ' (win)', ' (loss)')
-    order = ['stop (loss)', 'trail (loss)', 'trail (win)', 'take_profit (win)', 'open_eod (loss)', 'open_eod (win)']
+    order = ['stop (loss)', 'trail (loss)', 'trail (win)', 'take_profit (win)', 'time (loss)', 'time (win)',
+             'open_eod (loss)', 'open_eod (win)']
     exit_ = by('exit').reindex(order).dropna(how='all')
     b = ROE_BUCKETS
     labels = [f'< {b[1]:+.0%}'] + [f'{b[k]:+.0%} to {b[k + 1]:+.0%}' for k in range(1, len(b) - 2)] + [f'> {b[-2]:+.0%}']
@@ -252,7 +263,7 @@ def _windows_single(sig_roe, exit_idx, starts, size, t, margin):
 
 
 def _run_symbol(symbol, start, end, size, step, leverage, overlap, ema_set, stop_loss, trail_step,
-                take_profit, trail_gap, slope_min, margin, classify) -> Run | None:
+                take_profit, trail_gap, slope_min, margin, classify, max_bars=MAX_BARS) -> Run | None:
     df = _load(symbol, ema_set)
     t_all = df['open_time']
     p0 = 0 if start is None else int(t_all.searchsorted(pd.Timestamp(start, tz='UTC')))
@@ -263,13 +274,12 @@ def _run_symbol(symbol, start, end, size, step, leverage, overlap, ema_set, stop
         return None
     df = df.iloc[p0:].reset_index(drop=True)          # trades may run past the period end
     signal_col = f'entry_{ema_set}'
-    if slope_min != FAST_SLOPE_MIN:
-        df[signal_col] = entry_signal(df, ema_set, slope_min)
+    df[signal_col] = entry_signal(df, ema_set, slope_min)   # momentum only (incl. fast EMA slope minimum)
 
     # every signal's own trade; overlap=False only changes which ones are taken
     tr = simulate_trades(df, signal_col=signal_col, leverage=leverage, stop_loss=stop_loss,
                          trail_step=trail_step, take_profit=take_profit, trail_gap=trail_gap,
-                         last_signal=N - 1, overlap=True)
+                         last_signal=N - 1, overlap=True, max_bars=max_bars)
     sig_roe, exit_idx = np.full(N, np.nan), np.zeros(N, dtype=np.int64)
     if not tr.empty:
         tr = tr[tr['signal_idx'] < N].reset_index(drop=True)
@@ -290,11 +300,11 @@ def _run_symbol(symbol, start, end, size, step, leverage, overlap, ema_set, stop
     run = Run(symbol, pd.Timestamp(t[0]), pd.Timestamp(t[-1]), N, tr, windows)
     if classify:
         o, h, l, c = (df[f'{k}_5m'].to_numpy(dtype='float64') for k in ('open', 'high', 'low', 'close'))
-        args = (stop_loss / leverage, trail_step / leverage, take_profit / leverage,
-                None if trail_gap is None else trail_gap / leverage, leverage, FEE_RATE)
+        atr = df[ATR_COL].to_numpy(dtype='float64')
+        args = (stop_loss, trail_step, take_profit, trail_gap, leverage, FEE_RATE, max_bars)
         run.signal = df[signal_col].to_numpy()[:N]
-        run.long_roe = _outcomes(o, h, l, c, N, 1, *args)
-        run.short_roe = _outcomes(o, h, l, c, N, -1, *args)
+        run.long_roe = _outcomes(o, h, l, c, atr, N, 1, *args)
+        run.short_roe = _outcomes(o, h, l, c, atr, N, -1, *args)
     return run
 
 
@@ -316,7 +326,8 @@ def _metrics(trades: pd.DataFrame, windows: pd.DataFrame, margin: float, candles
         'max drawdown $': (equity - equity.cummax()).min(),
         'avg bars held': trades['bars_held'].mean() if len(trades) else np.nan,
         'exit stop': int(exits.get('stop', 0)), 'exit trail': int(exits.get('trail', 0)),
-        'exit take_profit': int(exits.get('take_profit', 0)), 'exit open_eod': int(exits.get('open_eod', 0)),
+        'exit take_profit': int(exits.get('take_profit', 0)), 'exit time': int(exits.get('time', 0)),
+        'exit open_eod': int(exits.get('open_eod', 0)),
         # ---- sliding windows
         'windows': len(windows),
         'with trade %': (windows['trades'] > 0).mean(),
@@ -331,23 +342,34 @@ def _metrics(trades: pd.DataFrame, windows: pd.DataFrame, margin: float, candles
 def run_backtest(symbols='BTCUSDT', size: int = 30, step: int = 1, start=None, end=None,
                  leverage: float = 10, overlap: bool = True, ema_set: str = '9_21_200',
                  stop_loss: float = STOP_LOSS, trail_step: float = TRAIL_STEP, take_profit: float = TAKE_PROFIT,
-                 trail_gap=TRAIL_GAP, slope_min: float = FAST_SLOPE_MIN, margin_usdt: float = 100,
-                 classify: bool = True, verbose: bool = True) -> Result:
+                 trail_gap=TRAIL_GAP, slope_min: float = FAST_SLOPE_MIN, max_bars=MAX_BARS,
+                 margin_usdt: float = 100,
+                 classify: bool = True, verbose: bool = True, include_holdout: bool = False) -> Result:
     """symbols: 'BTCUSDT' | 'ALL' (every data/*_master.parquet) | ['BTCUSDT', 'ETHUSDT', ...]
        size: candles per window; step: candles between window starts (1 = 1-30, 2-31, ...)
        start / end: period (UTC, end not included; None = first / last candle of the data).
-       classify: also simulate a long and a short from every candle -> precision / recall / f1 of the entry (~11 s / symbol)."""
+       stop_loss / trail_step / take_profit / trail_gap: ATR multiples (atr_5m at the signal candle).
+       classify: also simulate a long and a short from every candle -> precision / recall / f1 of the entry (~11 s / symbol).
+       include_holdout: False (default) cuts the period at features.HOLDOUT_START - the last 6 months are the
+                        paper's final test and must not be used for tuning. Every call is logged to results/trials.csv."""
     if ema_set not in EMA_SETS:
         raise ValueError(f'EMA_SET {ema_set!r}: use one of {list(EMA_SETS)}')
     size, step = int(size), int(step)
     if size < 1 or step < 1:
         raise ValueError('WINDOW_SIZE and STEP must be >= 1')
+    from features import HOLDOUT_START
+    if not include_holdout:
+        e = None if end is None else pd.Timestamp(end, tz='UTC')
+        if e is None or e > HOLDOUT_START:
+            if verbose:
+                print(f'period cut at the holdout start {HOLDOUT_START:%Y-%m-%d} (include_holdout=True to use it)')
+            end = HOLDOUT_START.tz_localize(None)
     if isinstance(symbols, str):
         symbols = all_symbols() if symbols.upper() == 'ALL' else [symbols]
     runs = {}
     for s in symbols:
         run = _run_symbol(s, start, end, size, step, leverage, overlap, ema_set, stop_loss, trail_step,
-                          take_profit, trail_gap, slope_min, margin_usdt, classify)
+                          take_profit, trail_gap, slope_min, margin_usdt, classify, max_bars)
         if run is not None:
             runs[s] = run
             if verbose:
@@ -361,7 +383,7 @@ def run_backtest(symbols='BTCUSDT', size: int = 30, step: int = 1, start=None, e
         trades = pd.concat([r.trades for r in runs.values()], ignore_index=True)
         cols['ALL'] = _metrics(trades, windows, margin_usdt, sum(r.candles for r in runs.values()),
                                min(r.first for r in runs.values()), max(r.last for r in runs.values()))
-    if classify:                                        # entry as a classifier (BOTH = buy + sell)
+    if classify:                                        # entry as a classifier (BOTH = long + short)
         groups = {s: [r] for s, r in runs.items()}
         if len(runs) > 1:
             groups['ALL'] = list(runs.values())
@@ -370,6 +392,15 @@ def run_backtest(symbols='BTCUSDT', size: int = 30, step: int = 1, start=None, e
             for k in ('precision', 'recall', 'f1', 'accuracy', 'lift (precision / base)', 'avg $ entry', 'avg $ any candle'):
                 cols[s][f'entry {k}'] = both[k]
     summary = pd.DataFrame(cols)
+    import trial_log
+    key = 'ALL' if 'ALL' in summary.columns else summary.columns[0]
+    pick = ['trades', 'win rate', 'profit factor', 'total P&L $', 'avg $ / trade', 'max drawdown $',
+            'entry precision', 'entry lift (precision / base)']
+    trial_log.log('backtest', dict(symbols='+'.join(runs), start=start, end=end, size=size, step=step,
+                                   leverage=leverage, overlap=overlap, ema_set=ema_set, slope_min=slope_min,
+                                   stop_loss=stop_loss, trail_step=trail_step, take_profit=take_profit,
+                                   trail_gap=trail_gap, max_bars=max_bars, include_holdout=include_holdout),
+                  {k: summary.at[k, key] for k in pick if k in summary.index})
     return Result(runs, size, step, overlap, margin_usdt, windows, summary)
 
 

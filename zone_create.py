@@ -20,7 +20,8 @@ NEAR_ATR_5M = 0.5        # "near" tolerance, in 5m ATR
 TOP_CLOSE_PCT = 0.35     # close in top 35% of the bar
 TAKER_BUY_RATIO = 0.52
 VOL_AVG_BARS = 20
-FAST_SLOPE_MIN = 0.0     # fast EMA (EMA9/13) slope must be > this (ATR units) in the trade direction
+FAST_SLOPE_MIN = 0.05    # momentum needs the fast EMA (EMA9/13) to move at least this much per 15m candle,
+                         # in 15m ATR, in the trend direction (must be > 0)
 
 
 def atr(df: pd.DataFrame, period: int = ATR_PERIOD,
@@ -44,16 +45,30 @@ def add_zones(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     w = BAND_ATR * df["atr"]
     df["res_hi"], df["res_lo"] = df["res"] + w, df["res"] - w
     df["sup_hi"], df["sup_lo"] = df["sup"] + w, df["sup"] - w
+
+    # zone strength (Chung & Bellotti: more touches -> stronger, older -> weaker), over the same N bars
+    hi, lo = df["high"].to_numpy("float64"), df["low"].to_numpy("float64")
+    for name, arr, best, inside in (("res", hi, np.argmax, lambda v, b: v >= b),
+                                    ("sup", lo, np.argmin, lambda v, b: v <= b)):
+        age = np.full(len(df), np.nan)
+        touches = np.full(len(df), np.nan)
+        if len(df) >= n:
+            win = np.lib.stride_tricks.sliding_window_view(arr, n)            # rows n-1 .. end
+            age[n - 1:] = n - 1 - best(win, axis=1)                            # bars since the level was set
+            band = (df["res_lo"] if name == "res" else df["sup_hi"]).to_numpy("float64")[n - 1:]
+            touches[n - 1:] = inside(win, band[:, None]).sum(axis=1)           # bars that reached the band
+        df[f"{name}_age"], df[f"{name}_touches"] = age, touches
     return df
 
 
 def zone_columns() -> list[str]:
-    return ["atr", "res", "res_hi", "res_lo", "sup", "sup_hi", "sup_lo"]
+    return ["atr", "res", "res_hi", "res_lo", "sup", "sup_hi", "sup_lo",
+            "res_age", "res_touches", "sup_age", "sup_touches"]
 
 
 # ---------------------------------------------------------------- step 2
 def add_zone_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Merged 5m frame (HTF columns already shift(1)-ed)."""
+    """Merged 5m frame (HTF columns = last CLOSED HTF candle)."""
     df = df.copy()
     df["atr_5m"] = atr(df, high="high_5m", low="low_5m", close="close_5m")
     c, a5 = df["close_5m"], df["atr_5m"]
@@ -74,27 +89,28 @@ def add_zone_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- step 3
 def entry_signal(df: pd.DataFrame, name: str, slope_min: float = FAST_SLOPE_MIN) -> np.ndarray:
-    """1 = buy, -1 = sell, 0 = nothing for one EMA test ('9_21_200' / '13_48_200'). Needs dist/touch columns.
-    slope_min: fast EMA slope must be > slope_min in the momentum direction (buy: > +min, sell: < -min)."""
-    fast, mid = {"9_21_200": (9, 21), "13_48_200": (13, 48)}[name]
-    m = df[f"momentum_{name}_15m"]
-    dist = df[f"dist_ema{fast}_5m"]
-    slope = df[f"ema{fast}_slope_15m"]
-    touch = df[f"touch_ema{mid}_5m"] == 1
-    return np.where((m * dist >= 0) & (m * slope > slope_min) & ~touch, m, 0).astype("int8")
+    """ENTRY = momentum only, for one EMA test ('9_21_200' / '13_48_200'):
+    bullish momentum -> 1 (long), bearish -> -1 (short), no momentum -> 0 (no entry).
+    Momentum = EMA order (fast > mid > 200 / 200 > mid > fast) + middle EMA not flat
+             + fast EMA slope >= slope_min ATR per 15m candle in the trend direction
+               (long: slope >= +slope_min, short: slope <= -slope_min). slope_min must be > 0.
+    Nothing else filters the entry; distances, touches and zones are ML features only."""
+    if not slope_min > 0:
+        raise ValueError(f"SLOPE_MIN must be > 0 (got {slope_min}): a flat or opposite fast EMA is no momentum")
+    fast = {"9_21_200": 9, "13_48_200": 13}[name]
+    m = df[f"momentum_{name}_15m"].fillna(0).to_numpy()
+    slope = df[f"ema{fast}_slope_15m"].to_numpy()
+    return np.where(m * slope >= slope_min, m, 0).astype("int8")
 
 
 def add_entry_signal(df: pd.DataFrame) -> pd.DataFrame:
     """ENTRY (docs/entry.md) - the only entry rule, one column per EMA test (never both at once):
       entry_9_21_200   uses momentum_9_21_200  + distance to EMA9
       entry_13_48_200  uses momentum_13_48_200 + distance to EMA13
-      On each completed 5m candle: momentum BULL -> buy (1), BEAR -> sell (-1), NONE -> 0.
-      No entry if the distance (close_5m - fast EMA) / ATR_5m is negative in the trade direction
-      (buy: close below the fast EMA, sell: close above it).
-      No entry if the fast EMA slope is against the momentum (buy: EMA9/13 falling, sell: rising).
-      No entry if the candle touches or crosses the pair's middle EMA (low <= EMA <= high):
-      EMA21 in the 9/21/200 test, EMA48 in the 13/48/200 test.
-      Enter at the next candle's open.
+      On each completed 5m candle: momentum BULL -> long (1), BEAR -> short (-1), NONE -> 0.
+      Enter at the next candle's open. No other entry filter.
+      dist_ema*_5m (close - fast EMA, ATR) and touch_ema*_5m (candle touches the middle EMA)
+      are still computed, as ML features only.
 
     The zone.md 3-step confirmation is still computed, but only as info / ML features
     (zone_long, zone_short) - it does NOT filter the entry:
@@ -140,13 +156,11 @@ def add_entry_signal(df: pd.DataFrame) -> pd.DataFrame:
     df["zone_short"] = ((mom == -1) & (df["short_pullback"] == 1) & (df["short_rejection"] == 1)
                         & (df["short_orderflow"] == 1)).astype("int8")
 
-    # ENTRY per EMA test. 1 = buy, -1 = sell, 0 = nothing
-    # never enter when the 5m candle touches or crosses the pair's middle EMA
-    # (9/21/200 -> EMA21, 13/48/200 -> EMA48; pairs never mixed)
+    # ML features (not entry filters): candle touches the middle EMA, close distance to the fast EMA
     for p in (21, 48):
         ema = df[f"ema{p}_15m"]
         df[f"touch_ema{p}_5m"] = ((l <= ema) & (h >= ema)).astype("int8")
     for name, fast in (("9_21_200", 9), ("13_48_200", 13)):
         df[f"dist_ema{fast}_5m"] = (c - df[f"ema{fast}_15m"]) / df["atr_5m"]
-        df[f"entry_{name}"] = entry_signal(df, name)    # fast EMA slope must point in the momentum direction
+        df[f"entry_{name}"] = entry_signal(df, name)    # momentum only
     return df

@@ -5,3 +5,7 @@ __pycache__/
 verify_features.html
 raw_data/
 data/
+# secrets - never commit (load keys from environment variables)
+config.py
+demo_api.txt
+.env

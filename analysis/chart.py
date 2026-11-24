@@ -181,11 +181,10 @@ def _plan_strip(fig, win, x):
     t, c = win.table, win.cols
     tick = lambda v: '✔' if v else '✘'
     hover = [f"<b>#{i} {st}</b> · momentum {m}<br>{c['bull']} {tick(bu)} · {c['bear']} {tick(be)}<br>"
-             f"{c['slope']} {sl:+.2f} ATR · not flat {tick(fl)}<br>{c['fslope']} {fs:+.2f} ATR · ok {tick(fo)}<br>"
-             f"{c['dist']} {d:+.2f} · ok {tick(ok)}<br>{c['touch']} {tick(tc)}"
-             for i, st, m, bu, be, sl, fl, fs, fo, d, ok, tc in zip(
+             f"{c['slope']} {sl:+.2f} ATR · not flat {tick(fl)}<br>{c['fslope']} {fs:+.2f} ATR · ok {tick(fo)}"
+             for i, st, m, bu, be, sl, fl, fs, fo in zip(
                  t.index, t['STATE'], t['MOMENTUM'], t[c['bull']], t[c['bear']], t[c['slope']], t[c['flat']],
-                 t[c['fslope']], t[c['fslope_ok']], t[c['dist']], t[c['dist_ok']], t[c['touch']])]
+                 t[c['fslope']], t[c['fslope_ok']])]
     fig.add_trace(go.Bar(x=x, y=[1] * len(t), marker_color=t['STATE'].map(T.STATE_COLORS), showlegend=False,
                          name='plan', hovertext=hover, hoverinfo='text',
                          text=t.index.astype(str), textposition='inside', insidetextanchor='middle',

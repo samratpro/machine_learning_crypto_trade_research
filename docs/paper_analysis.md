@@ -5,12 +5,12 @@ This file maps published research to each part of the current strategy and the p
 ## 0. What this project is, in one paragraph
 
 - **Universe and data:** 5 Binance spot pairs (BTC, ETH, SOL, BNB, XRP / USDT), 3 years, 5m bars with 15m / 1h / 4h / 1d context.
-- **Trend filter:** a 15m EMA-ribbon momentum filter, either 9/21/200 or 13/48/200. The middle EMA must not be flat (< 0.25 ATR over 8 bars) and the fast EMA's slope must point the same way.
-- **Entry:** taken on the 5m bar, and blocked if the bar touches the middle EMA.
-- **Zone features:** multi-timeframe rolling high/low support/resistance bands (± 0.25 ATR), with ATR-normalised distances and a 0–4 confluence score.
-- **Candle and order flow:** candle-rejection features plus kline taker-buy ratio.
-- **Exits:** 10× leverage, −20% ROE stop, trailing stop after +10%, +50% take-profit, 0.055% taker fee per side.
-- **Current result:** in the saved notebook run (all 5 coins) the entry has **46.6% precision vs a 44.9% base rate (lift 1.04)**, PF 0.89, against a break-even win rate of 49.4%. The latest commit message says "56% precision by filter feature only". The notebook output does not show the configuration behind that number.
+- **Trend filter / entry:** a 15m EMA-ribbon momentum filter, either 9/21/200 or 13/48/200 (never mixed). Momentum = EMA order + middle EMA not flat (< 0.25 ATR over 8 bars) + fast EMA slope ≥ `SLOPE_MIN` ATR per 15m candle in the trend direction. **Entry = momentum only** (long / short / none) on each closed 5m candle; everything else is an ML feature.
+- **Zone features:** multi-timeframe rolling high/low support/resistance bands (± 0.25 ATR) on 15m / 1h / 4h / 1d, used side-relative (zone ahead / behind the trade) with touch count and age.
+- **Candle, order flow, regime:** candle shape, kline taker-buy ratio (continuous + z-score), volume z-score, volatility regime, time of day, BTC lead.
+- **Exits:** all in ATR (atr_5m at the signal candle): stop 5 × ATR, trail 5 × ATR, take profit 25 × ATR, time limit 24 h; leverage 5 only scales ROE; 0.055% taker fee per side.
+- **HTF merge:** each 5m row sees every 15m / 1h / 4h / 1d candle closed by the 5m close (tested by `check_merge.py`).
+- **Current result (dev period, before the holdout):** momentum entries (13/48/200, `SLOPE_MIN 0.05`) win **46.6%** against a break-even of **49.5%** under these exits. The older "46.6% vs 44.9%" and "56%" figures came from earlier settings (% exits, old entry filters) and are no longer valid.
 - **Next step:** train an ML model on top of these rules.
 
 Each section below lists a paper, what it found, and **what it means for this repo**. Verification level: ✅ = bibliographic data and abstract checked online; ◐ = preprint / not peer-reviewed; findings are taken from abstracts and summaries, not full-text reading.
@@ -118,7 +118,7 @@ Each section below lists a paper, what it found, and **what it means for this re
 - **Meta-labeling:** a primary model gives the side, and a secondary ML model predicts *whether to take the trade* and how large to make it.
 - **Purged K-fold CV with embargo**, **sample uniqueness weights** for overlapping labels, and **feature importance (MDI/MDA/SFI)**.
 - **Relevance:** this is the most important reference for `ml_train.md`.
-  - Your `sliding._outcomes()` already computes a triple-barrier-style label (stop / trail / TP), but **without the time barrier** and with **fixed % barriers rather than volatility-scaled ones**.
+  - The label (`features.build_dataset`) is a triple-barrier-style outcome: ATR-scaled stop / trail / TP **plus a 24 h time barrier**.
   - Your EMA entry rule *is* a primary model, so the ML step is literally meta-labeling. The target is `1 if roe > 0`, predicted only on candles where `entry_* != 0`.
   - With `overlap=True`, consecutive trades share most of their price path, so labels are **heavily overlapping**. Plain K-fold or `train_test_split` will leak. You need purging, an embargo and uniqueness weights.
 
@@ -148,7 +148,7 @@ Each section below lists a paper, what it found, and **what it means for this re
 - **Multi-timeframe GBDT on BTC (arXiv:2602.10785)** ◐: gross +36% OOS became **negligible after costs** at AUC ≈ 0.60. A **look-ahead bug in higher-timeframe alignment inflated AUC by ~0.20** before it was fixed.
 - **Islas Anguiano & García-Medina (2025), arXiv:2511.00665** ◐: LightGBM vs LSTM vs TA on BTC. High trading frequency eroded LightGBM's returns after costs.
 - **Relevance:**
-  - Your `shift(1)` before merging HTF data is exactly the fix that paper needed. Keep a unit test for it, for example by asserting that `close_15m` at a 5m row equals the *previous closed* 15m close.
+  - Your close-time HTF merge is exactly the fix that paper needed, and `check_merge.py` tests it against the raw candles.
   - Expect a realistic AUC of 0.55–0.60. With TP/SL asymmetry and 1.1% round-trip ROE cost at 10×, check the precision you need *before* training (break-even ≈ 49.4% today).
 
 ---
@@ -186,7 +186,7 @@ Each section below lists a paper, what it found, and **what it means for this re
 | 6 | Report **precision lift over base rate**, net PF, and **per-year / per-coin** results | Fischer & Krauss 2018 |
 | 7 | Correct for trials: **SPA test, PBO, Deflated Sharpe** | Hansen 2005; Bailey et al. |
 | 8 | Calibrate probabilities and use them for **position sizing** | Meyer, Barziy & Joubert 2023 |
-| 9 | Keep the HTF `shift(1)` and **test it** | arXiv:2602.10785 |
+| 9 | Keep the close-time HTF merge and **test it** (`check_merge.py`) | arXiv:2602.10785 |
 
 ---
 

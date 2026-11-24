@@ -1,0 +1,11 @@
+# Python 3.14 - pinned versions used for the published results
+numpy==2.5.5
+pandas==3.1.1
+pyarrow==26.0.1
+plotly==7.1.0
+requests==2.34.2
+notebook==7.6.5
+ipykernel==7.4.0
+nbconvert==7.17.2
+# paper trading later (Bybit)
+pybit==5.17.2

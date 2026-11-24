@@ -1,7 +1,0 @@
-Name:test_bybit
-API Key: XjTKcbuhJLiyleeIfK00XXXXXX
-API Secret: TERNG4X9TviYjKq8vVZ4e2YmRmaH91YoNswG00XXXXXX
-Permission:
-Contracts - Orders Positions  , USDC Contracts - Trade  , Unified Trading - Trade  , SPOT - Trade  , Wallet - Account Transfer Subaccount Transfer  , Exchange - Convert，Exchange History 
-Expire: in 3 months
-Current Date:21-11-26

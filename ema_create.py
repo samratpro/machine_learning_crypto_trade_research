@@ -9,7 +9,7 @@ No momentum: middle EMA (EMA21 for the 9 test, EMA48 for the 13 test) is straigh
 momentum_9_21_200 / momentum_13_48_200:  1 = bullish, -1 = bearish, 0 = no momentum
 
 Call add_emas() on the raw 15m frame BEFORE data_merge.prepare_htf_data(),
-so the values get shift(1)-ed with the rest of the 15m columns (no leakage).
+the 15m values only reach a 5m row once their 15m candle has closed (no leakage).
 """
 import numpy as np
 import pandas as pd

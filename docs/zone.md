@@ -8,7 +8,7 @@
 - 1h: Rolling 24-bar High/Low (± 0.25 ATR) for main session structure.
 - 4h: Rolling 18-bar High/Low (± 0.25 ATR) for multi-day swing zones.
 - 1D: Rolling 14-bar High/Low (± 0.25 ATR) for major macro boundaries.
-- Always compute zones on each timeframe first, then shift(1) before merging into 5m.
+- Always compute zones on each timeframe first, then merge into 5m by close time (a 5m candle sees an HTF candle only once it has closed).
 
 ### Normalize Zones for ML:
 

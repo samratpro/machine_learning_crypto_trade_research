@@ -18,10 +18,15 @@ feature_columns = [
     "quote_volume", "trades", "taker_buy_base", "taker_buy_quote"
 ]
 
+TF_DURATION = {"5m": pd.Timedelta("5min"), "15m": pd.Timedelta("15min"), "1h": pd.Timedelta("1h"),
+               "4h": pd.Timedelta("4h"), "1d": pd.Timedelta("1D")}
+
+
 def prepare_htf_data(df, tf_suffix, extra_columns=()):
     """
-    Processes higher timeframe (HTF) data and shifts it by 1 period 
-    to strictly prevent future data leakage.
+    Processes higher timeframe (HTF) data. Each HTF row is keyed by the time its candle CLOSES
+    ('available_at' = open_time + duration), so it can only be merged into 5m rows that close
+    at or after that moment -> no unfinished candle is ever visible (no future data leakage).
     """
     # Convert Open_time to datetime and sort chronologically
     df["open_time"] = pd.to_datetime(df["open_time"])
@@ -35,10 +40,9 @@ def prepare_htf_data(df, tf_suffix, extra_columns=()):
     rename_map = {col: f"{col}_{tf_suffix}" for col in cols_to_keep if col != "open_time"}
     df = df.rename(columns=rename_map)
     
-    # Shift all HTF features forward by 1 period so only closed candles are visible
-    shifted_cols = list(rename_map.values())
-    df[shifted_cols] = df[shifted_cols].shift(1)
-    return df
+    # Key every HTF candle by its close time: it becomes visible only once it has closed
+    df["available_at"] = df["open_time"] + TF_DURATION[tf_suffix]
+    return df.drop(columns="open_time")
 
 # Process each cryptocurrency pair
 for symbol in symbols:
@@ -56,27 +60,33 @@ for symbol in symbols:
     df_base = df_base[base_cols].copy()
     df_base = df_base.rename(columns={col: f"{col}_5m" for col in base_cols if col != "open_time"})
     
-    # 2. Merge higher timeframes sequentially using point-in-time alignment
+    # 2. Merge higher timeframes sequentially using point-in-time alignment.
+    #    The decision is made when the 5m candle CLOSES (entry at the next open), so a 5m row sees
+    #    every HTF candle that has closed by then - including the one closing together with it
+    #    (5m 02:55-03:00 sees the 15m 02:45-03:00 candle).
+    df_base["decision_time"] = df_base["open_time"] + TF_DURATION["5m"]
     for tf in higher_timeframes:
         htf_path = os.path.join(data_dir, f"{symbol}_{tf}.csv")
         df_htf = pd.read_csv(htf_path)
-        
-        # HTF rolling indicators are computed BEFORE prepare_htf_data() so they get shift(1)-ed too
+
+        # HTF rolling indicators are computed BEFORE prepare_htf_data() on the HTF candles themselves
         extra = zone_columns()
         df_htf = add_zones(df_htf, tf)
         if tf == "15m":
             df_htf = add_emas(df_htf)
             extra = extra + ema_columns()
-        df_htf_shifted = prepare_htf_data(df_htf, tf, extra)
-        
+        df_htf_closed = prepare_htf_data(df_htf, tf, extra)
+
         df_base = pd.merge_asof(
-            df_base, 
-            df_htf_shifted, 
-            on="open_time", 
+            df_base,
+            df_htf_closed,
+            left_on="decision_time",
+            right_on="available_at",
             direction="backward"
-        )
-        
-    # 3. Drop initial NaN rows caused by shift(1) / indicator warm-up
+        ).drop(columns="available_at")
+    df_base = df_base.drop(columns="decision_time")
+
+    # 3. Drop initial NaN rows caused by indicator warm-up
     df_base = df_base.dropna().reset_index(drop=True)
 
     # 4. 5m-level zone features (ATR distances, confluence) + entry trigger

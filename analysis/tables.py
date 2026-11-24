@@ -13,9 +13,8 @@ def rules(win):
     tick = lambda v: '✔' if v else '✘'
     on = lambda color: (lambda v: f'color: {color}' if v else f'color: {theme.MUTED}')
     return (t.style
-            .format({k: tick for k in (c['bull'], c['bear'], c['flat'], c['fslope_ok'], c['dist_ok'], c['touch'])},
-                    precision=2)
-            .map(on(theme.GREEN), subset=[c['bull'], c['flat'], c['fslope_ok'], c['dist_ok'], c['touch']])
+            .format({k: tick for k in (c['bull'], c['bear'], c['flat'], c['fslope_ok'])}, precision=2)
+            .map(on(theme.GREEN), subset=[c['bull'], c['flat'], c['fslope_ok']])
             .map(on(theme.RED), subset=[c['bear']])
             .map(lambda v: theme.CELL_COLORS.get(v, ''), subset=['MOMENTUM', 'ENTRY', 'STATE']))
 
@@ -155,3 +154,38 @@ def bt_windows(res, sort='best', rows=20, symbol=None):
             .format({'win_rate': '{:.0%}', 'net_roe': '{:+.1%}', 'net_$': '{:+,.2f}',
                      'best_roe': '{:+.1%}', 'worst_roe': '{:+.1%}'}, na_rep='-')
             .map(_SIGN, subset=['net_roe', 'net_$']))
+
+
+# ---------------- momentum move, no stop (window_analysis.ipynb section 4) ----------------
+def moves(mv):
+    """One row per momentum entry in the window: best / worst / exit move in ATR."""
+    if mv.empty:
+        print('No momentum entry in this window - move START and re-run.')
+        return
+    print(f"{len(mv)} entries | LONG {(mv['side'] == 'long').sum()} · SHORT {(mv['side'] == 'short').sum()} | "
+          f"median best move {mv['mfe_atr'].median():+.2f} ATR | median worst {mv['mae_atr'].median():+.2f} ATR | "
+          f"exit in profit {(mv['end_atr'] > 0).mean():.0%}")
+    show = mv[['time', 'side', 'entry', 'atr', 'mfe_atr', 'mae_atr', 'end_atr', 'bars']].copy()
+    show['time'] = show['time'].dt.strftime('%m-%d %H:%M')
+    show['side'] = show['side'].str.upper()
+    display(show.style
+            .format({'entry': '{:,.2f}', 'atr': '{:,.2f}', 'mfe_atr': '{:+.2f}', 'mae_atr': '{:+.2f}',
+                     'end_atr': '{:+.2f}', 'bars': '{:,.0f}'})
+            .map(lambda v: theme.CELL_COLORS.get(v, ''), subset=['side'])
+            .map(_SIGN, subset=['mfe_atr', 'mae_atr', 'end_atr']))
+
+
+def move_summary(s):
+    """momentum_move.summary() table, formatted."""
+    def f(metric, v):
+        if pd.isna(v):
+            return '-'
+        if metric.endswith('%') or metric == 'atr % of price (median)':
+            return f'{v:.1%}' if not metric.startswith('atr') else f'{v:.3%}'
+        if '(ATR)' in metric:
+            return f'{v:+.2f}'
+        return f'{v:,.0f}'
+    shown = pd.DataFrame({c: [f(m, v) for m, v in s[c].items()] for c in s.columns}, index=s.index)
+    shown.columns = [str(c).upper() for c in shown.columns]
+    shown.index.name = 'metric'
+    display(shown.style.set_properties(**{'text-align': 'right'}))

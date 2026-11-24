@@ -13,13 +13,13 @@ ZONE_ALPHA = {'15m': 0.18, '1h': 0.10, '4h': 0.07, '1d': 0.05}
 EMA_COLORS = {9: '#facc15', 13: '#facc15', 21: '#a855f7', 48: '#a855f7', 200: '#ef4444'}
 
 # entry-plan strip colors
-STATE_COLORS = {'BUY': GREEN, 'SELL': RED, 'BLOCKED': YELLOW, 'SKIPPED': CYAN, 'NO ENTRY': GRAY}
+STATE_COLORS = {'LONG': GREEN, 'SHORT': RED, 'SKIPPED': CYAN, 'NO ENTRY': GRAY}
 
 # per-cell text colors for the rule table
-CELL_COLORS = {'BULL': f'color: {GREEN}', 'BUY': f'color: {GREEN}; font-weight: bold',
-               'BEAR': f'color: {RED}', 'SELL': f'color: {RED}; font-weight: bold',
+CELL_COLORS = {'BULL': f'color: {GREEN}', 'LONG': f'color: {GREEN}; font-weight: bold',
+               'BEAR': f'color: {RED}', 'SHORT': f'color: {RED}; font-weight: bold',
                'NONE': f'color: {MUTED}', '-': f'color: {MUTED}',
-               'BLOCKED': f'color: {YELLOW}', 'SKIPPED': f'color: {CYAN}', 'NO ENTRY': f'color: {MUTED}'}
+               'SKIPPED': f'color: {CYAN}', 'NO ENTRY': f'color: {MUTED}'}
 
 
 def base_layout(title: str, height: int) -> dict:

@@ -2,8 +2,8 @@
 Data + logic for one candle window (no plotting here).
 
 Entry rule (docs/entry.md), one EMA test at a time (ema_set = '9_21_200' or '13_48_200'):
-    on each completed 5m candle: momentum BULL -> BUY, BEAR -> SELL, NONE -> no entry,
-    and no entry if close is on the wrong side of the fast EMA (negative ATR distance)
+    on each completed 5m candle: momentum BULL -> LONG, BEAR -> SHORT, NONE -> no entry (nothing else)
+Momentum = EMA order + middle EMA not flat + fast EMA slope >= slope_min ATR in the trend direction
 Momentum (docs/ema.md, 15m): fast > mid > 200 = BULL, 200 > mid > fast = BEAR, mid EMA flat = NONE
 
     win = build_window('BTCUSDT', '2024-12-05 00:55', candles=30, leverage=10, overlap=True, ema_set='9_21_200')
@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from stop_loss import simulate_trades, STOP_LOSS, TRAIL_STEP, TAKE_PROFIT, TRAIL_GAP
+from stop_loss import simulate_trades, STOP_LOSS, TRAIL_STEP, TAKE_PROFIT, TRAIL_GAP, MAX_BARS
 from zone_create import VOL_AVG_BARS, FAST_SLOPE_MIN, entry_signal
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +50,7 @@ class Window:
     table: pd.DataFrame       # per-candle rule check
     trades: pd.DataFrame      # trades started in the window
     skipped: pd.DataFrame     # signals skipped while a trade was open
+    slope_min: float = FAST_SLOPE_MIN   # fast EMA slope minimum used for the momentum
 
     @property
     def end(self) -> int:
@@ -62,15 +63,14 @@ EMA_SETS = {'9_21_200': (9, 21, 200), '13_48_200': (13, 48, 200)}
 def rule_columns(ema_set: str) -> dict:
     f, m, sl = EMA_SETS[ema_set]
     return {'bull': f'EMA {f}>{m}>{sl}', 'bear': f'EMA {sl}>{m}>{f}', 'slope': f'EMA{m} slope',
-            'flat': f'EMA{m} not flat', 'fslope': f'EMA{f} slope', 'fslope_ok': f'EMA{f} slope ok',
-            'dist': f'close-EMA{f} (ATR)', 'dist_ok': 'distance ok', 'touch': f'Not touch EMA{m}'}
+            'flat': f'EMA{m} not flat', 'fslope': f'EMA{f} slope', 'fslope_ok': f'EMA{f} slope ok'}
 
 
 def rule_table(w: pd.DataFrame, ema_set: str, slope_min: float = FAST_SLOPE_MIN) -> pd.DataFrame:
     f, m, _ = EMA_SETS[ema_set]
     c = rule_columns(ema_set)
-    mom = w['momentum']
-    dist = w[f'dist_ema{f}_5m']
+    mom = w['momentum']                       # final momentum (incl. the fast EMA slope)
+    order = w[f'momentum_{ema_set}_15m']      # EMA order + not flat only
     fslope = w[f'ema{f}_slope_15m']
     return pd.DataFrame({
         'time':       w['open_time'].dt.strftime('%m-%d %H:%M'),
@@ -79,24 +79,21 @@ def rule_table(w: pd.DataFrame, ema_set: str, slope_min: float = FAST_SLOPE_MIN)
         c['bear']:    w[f'bear_{ema_set}_15m'] == 1,
         c['slope']:   w[f'ema{m}_slope_15m'].round(2),
         c['flat']:    w[f'ema{m}_flat_15m'] == 0,
-        'MOMENTUM':   mom.map({1: 'BULL', -1: 'BEAR', 0: 'NONE'}),
         c['fslope']:  fslope.round(2),
-        c['fslope_ok']: (mom != 0) & (mom * fslope > slope_min),
-        c['dist']:    dist.round(2),
-        c['dist_ok']: (mom != 0) & (mom * dist >= 0),
-        c['touch']:   w[f'touch_ema{m}_5m'] == 0,
-        'ENTRY':      w['entry'].map({1: 'BUY', -1: 'SELL', 0: '-'}),
+        c['fslope_ok']: (order != 0) & (order * fslope >= slope_min),
+        'MOMENTUM':   mom.map({1: 'BULL', -1: 'BEAR', 0: 'NONE'}),
+        'ENTRY':      w['entry'].map({1: 'LONG', -1: 'SHORT', 0: '-'}),
     }).reset_index(drop=True)
 
 
 def build_window(symbol: str, start_time, candles: int = 30, leverage: float = 10,
                  overlap: bool = True, ema_set: str = '9_21_200', stop_loss: float = STOP_LOSS,
                  trail_step: float = TRAIL_STEP, take_profit: float = TAKE_PROFIT,
-                 trail_gap=TRAIL_GAP, slope_min: float = FAST_SLOPE_MIN) -> Window:
+                 trail_gap=TRAIL_GAP, slope_min: float = FAST_SLOPE_MIN, max_bars=MAX_BARS) -> Window:
     """candles = 30        -> the 30 candles starting at start_time
        candles = (30, 60)  -> candle 30 up to (not incl.) candle 60, counted from start_time (candle 0)
-       slope_min: fast EMA slope (ATR units) must be > this in the trade direction (0 = any rise / fall)
-       stop_loss / trail_step / take_profit: position % (ROE), e.g. 0.20 = -20% -> price % = value / leverage"""
+       slope_min: momentum needs the fast EMA slope >= this (ATR per 15m candle) in the trend direction, > 0
+       stop_loss / trail_step / take_profit / trail_gap: ATR multiples (atr_5m at the signal candle), e.g. 5 = 5 x ATR"""
     df = load(symbol)
     start = int(df['open_time'].searchsorted(pd.Timestamp(start_time, tz='UTC')))
     if isinstance(candles, (tuple, list)):
@@ -105,12 +102,13 @@ def build_window(symbol: str, start_time, candles: int = 30, leverage: float = 1
             raise ValueError(f'CANDLES range {candles}: need 0 <= start < end')
         start, candles = start + a, b - a
     signal_col = f'entry_{ema_set}'
-    if slope_min != FAST_SLOPE_MIN:              # re-run the entry rule with this slope minimum
+    sig = entry_signal(df, ema_set, slope_min)   # momentum incl. the fast EMA slope minimum
+    if not np.array_equal(df[signal_col].to_numpy(), sig):
         df = df.copy()
-        df[signal_col] = entry_signal(df, ema_set, slope_min)
+        df[signal_col] = sig
     w = df.iloc[start:start + candles].copy()
     w['entry'] = w[signal_col]
-    w['momentum'] = w[f'momentum_{ema_set}_15m']
+    w['momentum'] = w[signal_col]
     candles = len(w)
     vol_avg = df['volume_5m'].rolling(VOL_AVG_BARS).mean().shift(1).iloc[start:start + candles]
     table = rule_table(w, ema_set, slope_min)
@@ -118,21 +116,21 @@ def build_window(symbol: str, start_time, candles: int = 30, leverage: float = 1
     # simulate from the window start; a trade may run past the window
     trades = simulate_trades(df.iloc[start:].reset_index(drop=True), leverage=leverage, keep_path=True,
                              stop_loss=stop_loss, trail_step=trail_step, take_profit=take_profit, trail_gap=trail_gap,
+                             max_bars=max_bars,
                              last_signal=candles - 1, overlap=overlap,
                              signal_col=signal_col)
     if not trades.empty:
         trades = trades[trades['signal_idx'] < candles].reset_index(drop=True)
 
-    # candle state: BUY / SELL (trade opened) / SKIPPED (signal while in a trade) / BLOCKED / NO ENTRY
+    # candle state: LONG / SHORT (trade opened) / SKIPPED (signal while in a trade) / NO ENTRY (no momentum)
     has_signal = (table['ENTRY'] != '-').to_numpy()
     taken = np.zeros(candles, dtype=bool)
     if not trades.empty:
         taken[trades['signal_idx'].astype(int).to_numpy()] = True
     state = np.full(candles, 'NO ENTRY', dtype=object)
-    state[(w['momentum'].to_numpy() != 0) & ~has_signal] = 'BLOCKED'   # momentum, but fast EMA slope / distance against it, or candle touches the middle EMA
     state[has_signal & ~taken] = 'SKIPPED'
     state[taken] = table['ENTRY'].to_numpy()[taken]
     table['STATE'] = state
 
     skipped = w[has_signal & ~taken]
-    return Window(symbol, df, start, candles, leverage, overlap, ema_set, rule_columns(ema_set), w, vol_avg, table, trades, skipped)
+    return Window(symbol, df, start, candles, leverage, overlap, ema_set, rule_columns(ema_set), w, vol_avg, table, trades, skipped, slope_min)

@@ -18,6 +18,8 @@
   - *Assumption:* the bearish line for 9/21/200 is not written above; it is implemented as the mirror of the bullish line
 - **Straight (flat)**: the middle EMA moved less than **0.25 × ATR(15m)** over the last **8 candles of 15m (2 hours)**
   - settings: `FLAT_ATR = 0.25`, `FLAT_BARS = 8` in ema_create.py
-- **No momentum**: middle EMA flat, or the EMAs not in bullish / bearish order (middle EMA not in the middle)
+- **Fast EMA slope**: the fast EMA (EMA9 / EMA13) must move at least **SLOPE_MIN x ATR(15m)** per 15m candle in the trend direction (up for bullish, down for bearish)
+  - setting: `FAST_SLOPE_MIN = 0.05` in zone_create.py, `SLOPE_MIN` in the notebooks; must be > 0
+- **No momentum**: middle EMA flat, or the EMAs not in bullish / bearish order (middle EMA not in the middle), or the fast EMA slope below SLOPE_MIN
 - Columns: `momentum_9_21_200`, `momentum_13_48_200` → 1 = bullish, −1 = bearish, 0 = no momentum
-- Computed on closed 15m candles only (shift 1 before merging into 5m), so a 5m candle never sees an unfinished 15m candle
+- Computed on closed 15m candles only (merged by close time: a 5m candle sees a 15m candle once it has closed, at the latest when the 5m candle closes), so a 5m candle never sees an unfinished 15m candle
